@@ -48,6 +48,7 @@ def main():
                             visualize=True,
                             viz_slice=("learning_rate", "dropout_rate"),
                             noise=0.002,
+                            rng=master_rng,
                             )
 
     opt.initialize(
