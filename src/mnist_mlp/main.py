@@ -4,26 +4,7 @@ from ..bo import BayesianOptimizer, RBFKernel
 from ..searchspace import HyperparamSpace, Real, Integer
 from .dataloader import load_mnist
 from .mnist_mlp_train import train
-
-
-def create_search_space() -> HyperparamSpace:
-    """Define the hyperparameter search space for the MLP model."""
-    #     return HyperparamSpace([
-    #     Real("learning_rate", 1e-4, 1e-2, log_prior=True),
-    #     Real("dropout_rate", 0.0, 0.5),
-    #     Integer("hidden_dim", 32, 256),
-    #     Real("weight_decay", 1e-6, 1e-2, log_prior=True),
-    #     Integer("n_layers", 2, 4),
-    #     Integer("batch_size", 32, 128),
-    # ])
-    return HyperparamSpace([
-        Real("learning_rate", 1e-5, 1e-2, log_prior=True),
-        Real("dropout_rate", 0.0, 0.5),
-        Integer("hidden_dim", 32, 512),
-        Real("weight_decay", 1e-6, 1e-2, log_prior=True),
-        #Integer("n_layers", 2, 5),
-        Integer("batch_size", 32, 128),
-    ])
+from ..shared_searchspace import create_search_space
 
 # well this is implemented but we dont use it yet
 user_seed_trials = [

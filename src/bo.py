@@ -15,6 +15,7 @@ from sklearn.decomposition import PCA
 import seaborn as sns, pandas as pd, numpy as np
 
 from .searchspace import HyperparamSpace
+from .viz import visualize
 
 
 # Kernels
@@ -201,9 +202,11 @@ class BayesianOptimizer:
         visualize: bool = False, 
         viz_slice: tuple[str,str] = None,
         rng: Optional[np.random.Generator] = None,
+        outdir: str = "assets",
     ):
         self.space = space
         self.rng = np.random.default_rng() if rng is None else rng
+        self.outdir = outdir
         self.maximize = maximize
         self.relearn_kernel = relearn_kernel
         self.n_relearn = n_relearn
@@ -326,81 +329,18 @@ class BayesianOptimizer:
         best_cfg = self.space.from_vector(self.X[best_idx])
         best_metric = -self.y[best_idx] if self.maximize else self.y[best_idx]
         if self.visualize:
-            self.visualize_bo() 
+            visualize(
+                X        = self.X,
+                y        = self.y,
+                space    = self.space,
+                maximize = self.maximize,
+                snapshots=self.snapshots,
+                viz_slice=self.viz_slice,
+                out_dir  = self.outdir,
+            )
         return best_cfg, best_metric, history
 
-    # ------------------------------------------------------------------ internals
     def _append(self, cfg: Dict[str, Any], loss: float) -> None:
         self.X = np.vstack([self.X, self.space.to_vector(cfg)[None, :]])
         self.y = np.append(self.y, loss)
         self.snapshots.append((self.X.copy(), self.y.copy()))
-
-
-    def visualize_bo(self, out_dir=".", dpi=120):
-        if not self.visualize:
-            return
-
-        # ---------- 3.1 PCA scatter ---------------------------------------------
-        Z = self.X
-        metric = -self.y if self.maximize else self.y
-        p = PCA(n_components=2).fit_transform(Z)
-        plt.figure(figsize=(6,5))
-        mu, sigma = metric.mean(), metric.std()
-        norm = colors.Normalize(vmin=mu - sigma, vmax=mu + sigma)
-        sc = plt.scatter(p[:,0], p[:,1], c=metric, cmap="viridis", norm=norm, s=40, alpha=0.8)
-        plt.colorbar(sc, label="metric")
-        plt.title("PCA of sampled hyper-parameters")
-        plt.annotate("best", xy=p[np.argmax(metric)])
-        plt.savefig(f"{out_dir}/pca_scatter.png", dpi=dpi)
-        plt.close()
-
-        # ---------- 3.2 seaborn pairplot ----------------------------------------
-        df = pd.DataFrame({
-            **{name: self.space.denormalise_col(name, Z[:, k])
-               for k, name in enumerate(self.space.param_names)},
-            "metric": metric,
-        })
-        q = 5  # number of quantiles for binning
-        df["metric_bin"] = pd.qcut(df["metric"], q=q, labels=False)
-
-        sns.pairplot(
-            df,
-            vars=self.space.param_names,
-            hue="metric_bin",
-            palette="viridis",
-            diag_kind="kde"
-        )
-        plt.savefig(f"{out_dir}/pairplot.png", dpi=dpi)
-        plt.close()
-
-        # ---------- 3.3 GIF of 2-D slice ----------------------------------------
-        dim1, dim2 = self.viz_slice
-        i, j = map(self.space.index_of, (dim1, dim2))
-        grid = np.linspace(0.0, 1.0, 100)
-        G1, G2 = np.meshgrid(grid, grid)
-        Zgrid = np.zeros((grid.size*grid.size, Z.shape[1]))
-
-        fig, ax = plt.subplots()
-        img = ax.imshow(np.zeros_like(G1), extent=[0,1,0,1], origin="lower",
-                cmap="plasma", vmin=0, vmax=1)          # dummy clim
-        scat = ax.scatter([], [], c="white", s=15)
-
-        def update(frame):
-            Xf, yf = self.snapshots[frame]
-            self.gp.fit(Xf, yf)
-            Zgrid[:] = 0.5
-            Zgrid[:, i] = G1.ravel()
-            Zgrid[:, j] = G2.ravel()
-            mu, std = self.gp.predict(Zgrid, return_std=True)   # << change
-            img.set_data(std.reshape(G1.shape))
-            img.set_clim(vmin=0, vmax=std.max())
-            scat.set_offsets(Xf[:, [i, j]])        # update points
-            ax.set_title(f"iteration {frame}")
-            return img, scat
-
-        ani = animation.FuncAnimation(fig, update,
-                                      frames=len(self.snapshots),
-                                      interval=600, blit=False)
-        ani.save(f"{out_dir}/surrogate.gif", writer="pillow")
-        plt.close(fig)
-        print(f"Visualisations saved to {out_dir}")
