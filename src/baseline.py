@@ -123,9 +123,9 @@ if __name__ == "__main__":
     parser.add_argument("--method", default="random",
                         choices=["random", "sobol", "lhs"],
                         help="sampling strategy")
-    parser.add_argument("--n_trials", type=int, default=20,
+    parser.add_argument("--n_trials", type=int, default=30,
                         help="number of configurations to evaluate")
-    parser.add_argument("--seed", type=int, default=123)
+    parser.add_argument("--seed", type=int, default=0)
     args = parser.parse_args()
 
     baseline(args.method, args.n_trials, args.seed)

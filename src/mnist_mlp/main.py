@@ -1,7 +1,6 @@
 import numpy as np
 import torch
-from ..bo import BayesianOptimizer, RBFKernel
-from ..searchspace import HyperparamSpace, Real, Integer
+from ..bo import BayesianOptimizer, RBFKernel, ARDRBFKernel
 from .dataloader import load_mnist
 from .mnist_mlp_train import train
 from ..shared_searchspace import create_search_space
@@ -12,23 +11,23 @@ user_seed_trials = [
       "dropout_rate": 0.2,
       "hidden_dim": 128,
       "weight_decay": 0.0,
-      "n_layers": 2,
       "batch_size": 64}, 0.971)   # prev val acc
     ]
 
 def main():
-    master_rng = np.random.default_rng(seed=123)
+    master_rng = np.random.default_rng(seed=0)
     torch.manual_seed(int(master_rng.integers(0, 2**31 - 1)))
 
 
     (X_train, y_train, X_val, y_val, X_test, y_test) = load_mnist(filepath="data/mnist.pkl")
     space = create_search_space()
     opt = BayesianOptimizer(space,
-                            kernel=RBFKernel(lengthscale=0.4),
+                            kernel=ARDRBFKernel,
                             maximize=True,
                             visualize=True,
                             viz_slice=("learning_rate", "dropout_rate"),
-                            noise=0.002,
+                            noise=0.01,
+                            xi_schedule=lambda iter: 0.02 * 0.8**iter,
                             rng=master_rng,
                             )
 

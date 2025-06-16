@@ -61,7 +61,45 @@ class RBFKernel(KernelBase):
         self.lengthscale, self.variance = np.exp(vec)
 
     def bounds(self):
-        return [(-5, 5), (-5, 5)]
+        # log-space bounds: ℓ ∈ [e-2, e^0.5], σ² ∈ [e-2, e^5]
+        return [(-2, 0.5), (-2, 5)]
+    
+
+
+class ARDRBFKernel:
+    """
+    Separate length-scale per dimension; drop-in replacement for RBFKernel.
+    bounds() returns one (ℓ_d) pair per dim plus one for log σ².
+    """
+    def __init__(self, lengthscale: np.ndarray | float | None = None, variance: float = 1.0):
+        """
+        If lengthscale is None we start with 1.0 for every dim; the optimiser’s
+        heuristic in `initialize()` overwrites it once D is known.
+        """
+        self.lengthscale = np.asarray(lengthscale if lengthscale is not None else 1.0, dtype=float)
+        self.variance = float(variance)
+
+    # kernel matrix
+    def __call__(self, X: np.ndarray, Y: np.ndarray | None = None) -> np.ndarray:
+        if Y is None:
+            Y = X
+        X = np.atleast_2d(X)
+        Y = np.atleast_2d(Y)
+        diff = (X[:, None, :] - Y[None, :, :]) / self.lengthscale
+        sqdist = np.sum(diff ** 2, axis=-1)
+        return self.variance * np.exp(-0.5 * sqdist)
+
+    def hyperparams(self) -> np.ndarray: # log-space
+         return np.log(np.concatenate([self.lengthscale, [self.variance]]))
+
+    def set_hyperparams(self, vec: np.ndarray) -> None:
+         self.lengthscale = np.exp(vec[:-1])
+         self.variance    = float(np.exp(vec[-1]))
+
+    # bounds for NLML optimiser: each log10 ℓ_d in [−2,+0.5], log10 σ² in [−2,+5]
+    def bounds(self):
+        D = self.lengthscale.size
+        return [(-2, 0.5)] * D + [(-2, 5)]
 
 # Gaussian Process regression
 
@@ -79,9 +117,11 @@ class GaussianProcess:
         X = np.atleast_2d(X).astype(np.float64)
         y = np.atleast_1d(y).astype(np.float64)
         assert X.shape[0] == y.shape[0]
+        self.y_mean = y.mean()
+        y_cent      = y - self.y_mean
         K = self.kernel(X) + (self.noise**2) * np.eye(len(X))
         self._L = np.linalg.cholesky(K + 1e-12 * np.eye(len(K)))
-        self._alpha = np.linalg.solve(self._L.T, np.linalg.solve(self._L, y))
+        self._alpha = np.linalg.solve(self._L.T, np.linalg.solve(self._L, y_cent))
         self.X_train, self.y_train = X, y
         return self
 
@@ -90,7 +130,7 @@ class GaussianProcess:
         X_star = np.atleast_2d(X_star).astype(np.float64)
         assert self._L is not None, "Call fit() first."
         K_star = self.kernel(self.X_train, X_star)
-        mean = K_star.T @ self._alpha  # (N*,)
+        mean = K_star.T @ self._alpha + self.y_mean
         if not return_std:
             return mean, None
         v = np.linalg.solve(self._L, K_star)
@@ -100,15 +140,17 @@ class GaussianProcess:
         std = np.sqrt(var)
         return mean, std
 
-    def nll(self, params: np.ndarray) -> float:
-        """Return NLML for given log‑lengthscale and log‑variance."""
-        length, var = np.exp(params)
-        self.kernel.lengthscale = length
-        self.kernel.variance = var
+    def nll(self, log_params: np.ndarray) -> float:
+        """
+        Negative log marginal likelihood for *any* kernel that implements
+        set_hyperparams().  We pass log-space params straight through.
+        """
+        self.kernel.set_hyperparams(log_params)
         K = self.kernel(self.X_train) + (self.noise**2) * np.eye(len(self.X_train))
         L = np.linalg.cholesky(K + 1e-12 * np.eye(len(K)))
-        alpha = np.linalg.solve(L.T, np.linalg.solve(L, self.y_train))
-        nll = 0.5 * self.y_train.T @ alpha + np.sum(np.log(np.diag(L))) + 0.5 * len(K) * np.log(2 * np.pi)
+        y_cent = self.y_train - self.y_mean
+        alpha  = np.linalg.solve(L.T, np.linalg.solve(L, y_cent))
+        nll = 0.5 * y_cent.T @ alpha + np.sum(np.log(np.diag(L))) + 0.5 * len(K) * np.log(2 * np.pi)
         return float(nll)
 
 
@@ -122,7 +164,7 @@ def expected_improvement(
 ) -> np.ndarray:
     """Analytic EI for *minimisation* problems."""
     mu, sigma = gp.predict(X, return_std=True)
-    sigma = sigma + 1e-12
+    sigma = np.maximum(sigma, 2e-2) 
     z = (f_best - mu - xi) / sigma
 
     ei = (f_best - mu - xi) * norm.cdf(z) + sigma * norm.pdf(z)
@@ -131,6 +173,43 @@ def expected_improvement(
 
 # Acquisition optimiser (search over unit hyper‑cube)
 
+# def propose_location(
+#     gp: GaussianProcess,
+#     bounds: list[tuple[float, float]],
+#     y_best: float,
+#     rng: Optional[np.random.Generator] = None,
+#     n_restarts: int = 25,
+#     n_raw_samples: int = 1000,
+#     xi: float = 0.01,
+# ) -> np.ndarray:
+#     """
+#     Suggest the next evaluation point by maximising Expected Improvement.
+
+#     Returns
+#     -------
+#     np.ndarray, shape (D,)
+#         Normalised coordinates of the candidate in [0, 1]^D.
+#     """
+#     dim = len(bounds)
+#     rng = np.random.default_rng() if rng is None else rng
+
+#     # EI as a *negative* function so we can use scipy’s minimiser
+#     def _neg_ei(z: np.ndarray) -> float:
+#         return -expected_improvement(z[None, :], gp, y_best, xi=xi)[0]
+
+#     # ---- stage 1: random search to find good starting points ---------------
+#     Z_raw = rng.uniform(0.0, 1.0, size=(n_raw_samples, dim))
+#     starts = Z_raw[np.argsort([_neg_ei(z) for z in Z_raw])[:n_restarts]]
+
+#     # ---- stage 2: local L-BFGS-B polish -----------------------------------
+#     best_x, best_val = None, np.inf
+#     for x0 in starts:
+#         res = minimize(_neg_ei, x0=x0, bounds=bounds, method="L-BFGS-B")
+#         if res.fun < best_val:
+#             best_x, best_val = res.x, res.fun
+
+#     assert best_x is not None
+#     return best_x
 def propose_location(
     gp: GaussianProcess,
     bounds: list[tuple[float, float]],
@@ -140,26 +219,37 @@ def propose_location(
     n_raw_samples: int = 1000,
     xi: float = 0.01,
 ) -> np.ndarray:
-    """
-    Suggest the next evaluation point by maximising Expected Improvement.
-
-    Returns
-    -------
-    np.ndarray, shape (D,)
-        Normalised coordinates of the candidate in [0, 1]^D.
-    """
     dim = len(bounds)
     rng = np.random.default_rng() if rng is None else rng
 
-    # EI as a *negative* function so we can use scipy’s minimiser
+    # --- compute EI on a big random grid and print stats -------------------
+    Z_raw = rng.uniform(0.0, 1.0, size=(n_raw_samples, dim))
+    ei_vals = expected_improvement(Z_raw, gp, y_best, xi=xi)
+    print(f"[DEBUG] EI over {n_raw_samples} random points:")
+    print(f"        min={ei_vals.min():.3e},  max={ei_vals.max():.3e}")
+    print(f"        mean={ei_vals.mean():.3e},  #>0 = {int((ei_vals>0).sum())}/{n_raw_samples}")
+
+    # if you also want to see how uncertain your GP is:
+    mu, sigma = gp.predict(Z_raw, return_std=True)
+    mask = sigma < 1e-4
+    ei_vals[mask] = 0.0
+    sigma[mask]   = 1e-4 
+    print(f"[DEBUG] σ over random points: min={sigma.min():.3e}, max={sigma.max():.3e}, mean={sigma.mean():.3e}")
+    ls = gp.kernel.lengthscale
+    if np.ndim(ls) == 0 or np.isscalar(ls):
+        ls_str = f"{float(ls):.3f}"
+    else:
+        ls_str = np.array2string(ls, precision=3)
+    print(f"[DEBUG] kernel ls={ls_str}, var={gp.kernel.variance:.3f}")
+
+    # now define the negative acquisition for L-BFGS
     def _neg_ei(z: np.ndarray) -> float:
         return -expected_improvement(z[None, :], gp, y_best, xi=xi)[0]
 
-    # ---- stage 1: random search to find good starting points ---------------
-    Z_raw = rng.uniform(0.0, 1.0, size=(n_raw_samples, dim))
+    # find best few starting points by EI
     starts = Z_raw[np.argsort([_neg_ei(z) for z in Z_raw])[:n_restarts]]
 
-    # ---- stage 2: local L-BFGS-B polish -----------------------------------
+    # polish with L-BFGS-B
     best_x, best_val = None, np.inf
     for x0 in starts:
         res = minimize(_neg_ei, x0=x0, bounds=bounds, method="L-BFGS-B")
@@ -167,8 +257,8 @@ def propose_location(
             best_x, best_val = res.x, res.fun
 
     assert best_x is not None
+    print(f"[DEBUG] best EI = {-best_val:.3e} at z = {best_x}")
     return best_x
-
 
 class BayesianOptimizer:
     """
@@ -196,9 +286,10 @@ class BayesianOptimizer:
         kernel: KernelBase | type[KernelBase] = RBFKernel,
         kernel_kwargs: dict | None = None,
         maximize: bool = False,
-        noise: float = 1e-6,
-        relearn_kernel: bool = True,
-        n_relearn = 3,
+        noise: float = 0.003,
+        relearn_kernel: bool = False,
+        n_relearn = 2,
+        xi_schedule: Callable[[int], float] = lambda iter: 0.02,
         visualize: bool = False, 
         viz_slice: tuple[str,str] = None,
         rng: Optional[np.random.Generator] = None,
@@ -210,6 +301,7 @@ class BayesianOptimizer:
         self.maximize = maximize
         self.relearn_kernel = relearn_kernel
         self.n_relearn = n_relearn
+        self.xi_schedule = xi_schedule
         self.visualize = visualize
         assert (not visualize) or (viz_slice is not None), "viz_slice must be set when visualize is True"
         self.viz_slice = viz_slice
@@ -232,10 +324,10 @@ class BayesianOptimizer:
         user_trials: list[tuple[dict, float]] | None = None,
         method: str = "sobol",
     ):
-        """Add user-supplied trials then top-up to D with new designs."""
+        """Add user-supplied trials then top-up to 2xD with new designs."""
         self.X, self.y = np.empty((0, len(self.space))), np.empty((0,))
 
-        # 1) ingest user-supplied evaluations (skip duplicates)
+        #ingest user-supplied evaluations (skip duplicates)
         seen: set[tuple] = set()
         if user_trials:
             for cfg, metric in user_trials:
@@ -247,8 +339,8 @@ class BayesianOptimizer:
                 loss = -metric if self.maximize else metric
                 self._append(cfg, loss)
 
-        # 2) decide how many extra points we need
-        target = max(len(self.space), 1)
+        # decide how many extra points we need
+        target = max(2*len(self.space), 1)
         n_extra = target - len(self.y)
         if n_extra > 0:
             extra_cfgs = self.space.sample_batch(n_extra, self.rng, method=method)
@@ -256,6 +348,22 @@ class BayesianOptimizer:
                 metric = train_fn(cfg, X_train, y_train, X_val, y_val)
                 loss = -metric if self.maximize else metric
                 self._append(cfg, loss)
+
+        # Set ℓ_d to median pair-wise distance in each dimension,
+        # σ² to empirical variance of y.  Works for both RBF and ARD-RBF.
+        if len(self.y) >= 2:
+            Z = self.X
+            # (a) median L1 distance per dimension  → ensure 1-D array
+            med_ls = np.median(np.abs(Z[:, None, :] - Z[None, :, :]), axis=(0, 1))
+            med_ls = np.clip(med_ls, 0.05, 5.0)
+            med_ls = np.atleast_1d(med_ls)        # scalar for isotropic RBF
+
+            # (b) empirical variance of losses, lower-bounded
+            var_y = max(float(np.var(self.y)), 0.01)
+
+            # (c) pack log-hyper-params   (works for RBF *and* ARD-RBF)
+            hp_vec = np.log(np.concatenate([med_ls, [var_y]]))
+            self.kernel.set_hyperparams(hp_vec)
 
         best_metric = max(-self.y) if self.maximize else self.y.min()
         print(f"Initialised with {len(self.y)} points (user + {n_extra} new). "
@@ -265,32 +373,54 @@ class BayesianOptimizer:
     def _relearn_kernel(self):
         if self.gp.X_train is None:
             return
-        if len(self.y) % self.n_relearn: # only relearn every n_relearn iterations
+        if len(self.y) < 4 * len(self.space):  # need ≥ 4·D points for stability
+            return
+        if len(self.y) % self.n_relearn:
             return
         def nll(vec): return self.gp.nll(vec)
         x0 = self.kernel.hyperparams()
         res = minimize(nll, x0, bounds=self.kernel.bounds())
+        if res.fun > nll(x0): # skip if optimisation diverged
+            return
         self.kernel.set_hyperparams(res.x)   # gp.nll updates kernel, but explicit is fine
 
-    def ask(self, iter_cnt, xi_schedule=lambda iter: 0.01*0.8**iter) -> np.ndarray:
-        """Return the next normalised vector proposed by Expected Improvement."""
-        assert len(self.y) > 0, "Call initialize() first."
+    # def ask(self, iter_cnt, xi_schedule=lambda iter: 0.01*0.8**iter) -> np.ndarray:
+    #     """Return the next normalised vector proposed by Expected Improvement."""
+    #     assert len(self.y) > 0, "Call initialize() first."
+    #     self.gp.fit(self.X, self.y)
+    #     if self.relearn_kernel:
+    #         self._relearn_kernel()
+        
+    #     xi = xi_schedule(iter_cnt)
+
+    #     z_next = propose_location(
+    #         self.gp,
+    #         bounds=self.space.bounds(),
+    #         y_best=float(self.y.min()),
+    #         rng=self.rng,
+    #         n_restarts=25,
+    #         n_raw_samples=1000,
+    #         xi=xi,
+    #     )
+    #     return z_next
+
+    def _propose(self, iter_cnt):
         self.gp.fit(self.X, self.y)
         if self.relearn_kernel:
             self._relearn_kernel()
-        
-        xi = xi_schedule(iter_cnt)
+        xi = self.xi_schedule(iter_cnt)
+        return propose_location(
+            self.gp, self.space.bounds(), float(self.y.min()),
+            rng=self.rng, n_restarts=25, n_raw_samples=1000, xi=xi)
 
-        z_next = propose_location(
-            self.gp,
-            bounds=self.space.bounds(),
-            y_best=float(self.y.min()),
-            rng=self.rng,
-            n_restarts=25,
-            n_raw_samples=1000,
-            xi=xi,
-        )
-        return z_next
+    def ask(self, iter_cnt):
+        for _ in range(7): # up to 7 attempts
+            z = self._propose(iter_cnt)
+            if not (self.X.size
+                    and (np.abs(self.X - z).max(axis=1) < 1e-3).any()):
+                return z # unique
+        # fallback: random jitter
+        return self.rng.uniform(0.0, 1.0, size=len(self.space))
 
     def tell(
         self,
@@ -340,7 +470,18 @@ class BayesianOptimizer:
             )
         return best_cfg, best_metric, history
 
-    def _append(self, cfg: Dict[str, Any], loss: float) -> None:
-        self.X = np.vstack([self.X, self.space.to_vector(cfg)[None, :]])
+    def _append(self, cfg: Dict[str, Any], loss: float, eps: float = 1e-3) -> None:
+        """
+        Store the new sample unless its vector is already inside
+        an ε-cube of an existing point.  ε = 1e-3 means points that differ
+        by < 0.1 % in **every** dimension are considered duplicates; EI is
+        still free to probe the neighbourhood.
+        """
+        z = self.space.to_vector(cfg)
+        if self.X.size:
+            dmax = np.abs(self.X - z).max(axis=1)
+            if (dmax < eps).any():
+                return # exact duplicate
+        self.X = np.vstack([self.X, z[None, :]])
         self.y = np.append(self.y, loss)
         self.snapshots.append((self.X.copy(), self.y.copy()))
