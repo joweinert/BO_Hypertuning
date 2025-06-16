@@ -11,7 +11,7 @@ user_seed_trials = [
       "dropout_rate": 0.2,
       "hidden_dim": 128,
       "weight_decay": 0.0,
-      "batch_size": 64}, 0.971)   # prev val acc
+      "batch_size": 64}, 0.971)   # config_dict, prev val acc -> same structure as hyperparam space -> use previous runs as information for BO
     ]
 
 def main():
@@ -39,8 +39,8 @@ def main():
 
     best_cfg, best_acc, hist = opt.run(train, X_train, y_train, X_val, y_val, n_iter=15)
 
-    print("✓ Best accuracy", best_acc)
-    print("✓ Hyper-parameters", best_cfg)
+    print("Best accuracy", best_acc)
+    print("Hyperparameters", best_cfg)
 
 
 if __name__ == "__main__":

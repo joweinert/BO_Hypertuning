@@ -84,7 +84,7 @@ def baseline(method: str, n_trials: int, seed: int = 123):
     Xtr, ytr, Xv, yv, _, _ = load_mnist(filepath="data/mnist.pkl")
     space = create_search_space()
 
-    # randomly sample `n_trials` configurations from the search space according to method 
+    # randomly sample n_trials configurations from the search space according to method 
     cfgs = space.sample_batch(n_trials, rng, method=method)
     vecs, scores = [], []
 
@@ -109,14 +109,13 @@ def baseline(method: str, n_trials: int, seed: int = 123):
         y        = -np.array(scores), # flipped -> maximize accuracy
         space    = space,
         maximize = True,
-        snapshots=None, # skip GIF
+        snapshots=None, # skip GIF (no GP)
         viz_slice=None,
         out_dir  = f"fig_{method}"
     )
     return best_cfg, best_acc, scores
 
 
-# ------------------------------------------------------------------- CLI ---
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         description="Uniform / Sobol / LHS baseline for hyper-parameter search")

@@ -12,11 +12,11 @@ class HyperParam(ABC):
 
     @abstractmethod
     def transform(self, value: Any) -> float:
-        """Map raw value -> normalised value in [0,1]."""
+        """Map raw value -> normalized value in [0,1]."""
 
     @abstractmethod
     def inverse(self, z: float) -> Any:
-        """Inverse of transform: normalised -> raw."""
+        """Inverse of transform: normalized -> raw."""
 
     @abstractmethod
     def sample(self, rng: np.random.Generator | np.random.RandomState | None = None) -> Any:
@@ -27,7 +27,6 @@ class HyperParam(ABC):
 
     def __repr__(self) -> str:
         return f"{self.__class__.__name__}({self.name})"
-
 
 
 class Real(HyperParam):
@@ -49,11 +48,11 @@ class Real(HyperParam):
         self.round_to_int = bool(round_to_int)
 
     def _log_bounds(self) -> tuple[float, float]:
-        """Return log10-scaled bounds."""
+        """Returns log10-scaled bounds."""
         return np.log10(self.low), np.log10(self.high)
 
     def transform(self, value: float) -> float:
-        """Affine warp (uniform) or affine warp of log10(value) (log-uniform)."""
+        """uniform or log10(value) (log-uniform) normalization"""
         if self.log_prior:
             log_val = np.log10(value)
             low, high = self._log_bounds()
@@ -86,7 +85,7 @@ class Real(HyperParam):
             value = int(round(value))
         return value
 
-    def __repr__(self) -> str:  # pragma: no cover
+    def __repr__(self) -> str:
         prior = "log-uniform" if self.log_prior else "uniform"
         rflag = ", int" if self.round_to_int else ""
         return f"Real({self.name}, {self.low}, {self.high}, {prior}{rflag})"
@@ -100,7 +99,7 @@ class Integer(Real):
 
 
 class HyperparamSpace:
-    """A *fixed* collection of HyperParam objects."""
+    """A fixed collection of HyperParam objects."""
 
     def __init__(self, params: Sequence[HyperParam]):
         self.params: List[HyperParam] = list(params)
@@ -119,7 +118,7 @@ class HyperparamSpace:
         return self.param_names.index(name)
 
     def to_vector(self, config: Dict[str, Any]) -> np.ndarray:
-        """Convert raw config dict-> normalised np.ndarray of shape (D,)."""
+        """Converts raw config dict-> normalized np.ndarray of shape (D,)."""
         return np.array([p.transform(config[p.name]) for p in self.params], dtype=np.float64)
 
     def from_vector(self, z: Sequence[float]) -> Dict[str, Any]:
@@ -133,6 +132,7 @@ class HyperparamSpace:
         rng: np.random.Generator,
         method: str = "sobol", # "sobol" | "lhs" | "random"
     ) -> list[dict]:
+        """Samples a batch of n configurations in the normalized space."""
         D = len(self)
         if method == "sobol":
             engine = qmc.Sobol(d=D, scramble=True, seed=rng.integers(2**32))
@@ -140,16 +140,16 @@ class HyperparamSpace:
         elif method == "lhs":
             engine = qmc.LatinHypercube(d=D, seed=rng.integers(2**32))
             Z = engine.random(n)
-        else:                               # fallback random
+        else: # fallback random
             Z = rng.random((n, D))
         return [self.from_vector(z) for z in Z]
 
 
     def bounds(self) -> List[tuple[float, float]]:
-        """Return box bounds in the normalised space - always (0,1) at this stage."""
+        """Return box bounds in the normalized space - always (0,1)"""
         return [(0.0, 1.0)] * len(self.params)
     
     def denormalise_col(self, name: str, col: np.ndarray) -> np.ndarray:
-        """Vectorised inverse transform for a single column."""
+        """Vectorized inverse transform for a single column"""
         p = next(par for par in self.params if par.name == name)
         return np.vectorize(p.inverse, otypes=[float])(col)

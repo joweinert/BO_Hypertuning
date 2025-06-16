@@ -68,7 +68,7 @@ def train(hyper_cfg, X_train, y_train, X_val, y_val, *, device="cpu"):
 
             total_loss += loss.item()
 
-        #print(f"Epoch {epoch+1}, Train loss: {total_loss / len(train_loader):.4f}")
+        #print(f"Epoch {epoch+1}, Train loss: {total_loss / len(train_loader):.4f}") #removed due to SPAAM 
 
     model.eval()
     correct = total = 0
